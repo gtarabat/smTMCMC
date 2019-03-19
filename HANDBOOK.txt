@@ -1,0 +1,182 @@
+Handbook for Matlab Parallel mTMCMCWritten by Georgios Arampatzis, Daniel Waelchli (Origin: Panagiotis Angelikopoulos, Stephen Wu)Created on July 25, 2016-----Last update: 2016-07-25 by Daniel WaelchliUpdate content: 
+1. (2015-06-02) add support for burn-in, issue of mnrnd resolved
+2. (2015-06-17) add run time tracking
+3. (2015-09-18) add min. initial values for optimization of annealing power
+4. (2015-10-24) support N_burn,minP,maxP having length not equal to indicated generation5. (2015-11-03) correct variable name for opt_setup in else-statement inside UserInput.m
+6. (2016-07-25) update to mTMCMC, including higher order proposal schemes for TMCMC/BASIS-----
+
+Reference: This program developed based on TMCMC Ching and Chen (2007) 
+	and mTMCMC G.Arampatzis, D.Waelchli, P. Angelikopoulos, S.Wu and P. Koumoutsakos (2016)
+
+Warning:
+X 1. run_SimpleSystem_CMA breaks after first start in parallel mode, issue with file transfer
+			> please start CMA optimization again
+X 2. sometimes the random number generator complains and code breaks
+			> please restart MATLAB
+X [Problem solved] 3. mnrnd will lead to storage issue when number of samples is large (e.g. 90k),
+	change resampling implementation when large number of samples needed
+
+
+Special Features:
+1.  User can set maximum length of MCMC chain to improve efficiency of parallelization,
+	perfect parallelization achieved when max. length is set to 1.
+	(Note: only unique samples are stored, and weights are multiplied based on number of samples
+	for each unique sample. Hence, MCMC chains are longer than the original TMCMC implementation)
+2.  Annealing prior option is available, i.e., the annealing power can affect both likelihood and prior
+	(suggested to be used with proposal prior samples only)
+3.  User can use samples from a proposal pdf at the first stage instead of samples from prior
+	(suggested to turn on both annealing prior and this proposal prior option)
+4.  Absolute bounds for the samples can be set, which is equivalent to introducing an extra uniform prior,
+	samples exceeding the bounds are rejected. If many samples are closed to the bounds, this is an 
+ 	alert of using bigger bounds.
+5.  Extended bounds for the covariance adaption can be set through ‘extend_bds’ in User_Input.
+	Adaption is made with respect to upper/lower bound +/- width*extend_bds
+6.  Only unique samples are stored. Count of repeated samples is stored separately. 
+	Be caution when using the samples for predictions, etc.
+7.  Count of acceptance and rejection of samples at each stage is stored for statistics purpose
+8.  Count of posdef matrices, corrected sigmas and corrected bounds at each stage is stored for statistics purpose
+9.  A matlab code for plotting results is also included for quick visualization (plot_results_hist.m)
+10. A burn-in period applied to each MCMC chain in the run can be set through ’N_burn’ in User_Input
+11. Restart option in User_Input, generation file must be provided
+
+
+Assumptions / Defaults:
+1. Stage 1 (runinfo.gen = 1) refers to the prior samples, where no MCMC run is performed.
+2. Likelihood function takes one sample at a time, i.e., 
+	need not to be able to take in multiple samples at one time
+3. Customized prior function is required to take multiple samples at one time,
+	input samples structured as [#samples x #dimension]
+	(Note: this assumption only used in BASIS_Worker at stage 1, user can change it if wanted]
+
+
+Main variables:
+1. sys_para - 1x1 struct
+	(a) created in ‘User_Input.m’, not modified during the program running
+	(b) details of meaning of each parameters can be found in ‘User_Input.m’
+
+2. runinfo - 1x1 struct
+	(a) created in ‘BASIS_Master.m’, record the parameters during BASIS run
+	(b) all intermediate results are saved in runinfo, as well as final results
+	(c) detail of the struct
+		.gen - count of current generation (stage)
+		.p - vector of annealing powers until current stage
+		.TF_fin - boolean to track if next stage is final stage (p -> 1)
+			(Note: equals 0 if program quit by exceeding max. stages allowed)
+		.cov_s - scaled covariance matrix for theta (sample) used in proposal of MCMC walk
+			(Note: scaled means beta^2 in included already)
+		.N_accept - total count of how many times samples being accepted during MCMC run at each stage
+		.N_posdef - total count of how many times proposal cov is mistakenly positive definite (needs correction)
+		.N_correc - total count of how many times proposal covs is being corrected
+		.sys_para - system parameter, created in User_Input, stored for restarting option
+		.theta - all distinct samples at current stage [#sample x #dimension]
+		.out_gradient - all distinct gradients at current stage [#sample x #dimension]
+		.out_gamma - all distinct gamma (correction terms) at current stage [#sample x #dimension]
+		.Ns - count of samples being repeated [#sample x 1]
+		.pri - ln(Prior) of samples [#sample x 1]
+		.lik - ln(Likelihood) of samples [#sample x 1]
+		.out_lik - cells of extra outputs from likelihood function {#sample x 1}
+		.out_sig - cells of proposal sigmas {#sample x 1}
+		.eps - scaling parameter of higher order proposals (eps can vary if adaptive scaling turned on)
+		.burnin_reps - count of how many times adaptive scaling has o be repeated per sample (if adaptive scaling turned on, else 0)
+		.accept - vector of how many times a sample being accepted during MCMC run at each stage
+		.bds_flg - matrix showing in which dimension proposal had to be adapted [#sample x #dimension]
+		.posdef - vector of how many times a proposal cov is mistakenly positive definite (needs correction)
+		.correction_sigma - vector of how many times a sample has to be corrected during MCMC run at each stage	
+		.cv_err2 - vector of (coefficient of variance of samples - preset tolerance cv_tol)^2
+			(Note: length = total gen - 1, because not calculated in the final stage)
+		.w - weight of samples used in resampling step [#sample x 1]
+			(Note: Ns is already considered in the weight, this is final weight of sample)
+		.S_lnEv - vector of partial ln(Evidence) at each stage (not calculated in final stage)
+		.lnEv - final estimate of ln(Evidence) = sum(S_lnEv)
+			(Note: not exist if program quit by exceeding max. stages allowed)
+
+3. out_master - 1x1 struct
+	(a) created in ‘BASIS_Master.m’, record the final output of BASIS run
+	(b) detail of the struct
+		[Contain all properties in runinfo with following add-on]
+		.mean_fin - vector of mean of the final sample set in each dimension
+		.cov_fin - covariance matrix for the final sample set
+		.runtime - total running time of algorithm inside BASIS_Master.m
+
+
+Program Structure:
+
+(Runnable’s)
+1. run_SimpleSystem - short file to run the Simple System defined in ‘ode_simple.mat’ and data from ‘data_simple_ode.mat’
+	uses ‘Input_SimpleSystem’ then runs ‘BASIS_Master’, results stored in ./data/simple_system/
+	takes artificial data from ./data/simple_system/data_simple_ode.mat
+2. run_SimpleSystem_CMA - find optimal parameters for ‘ode_simple.mat’ and ‘data_simple_ode.mat’ with CMA-ES optimizer, 
+	results stored in ./data/simple_system/CMA/
+3. plot_results_hist - creates histogram plot of results from BASIS_Master
+
+(Core Functions)
+1. Input_SimpleSystem - prepare all parameters needed to run BASIS, stored in ‘sys_para’,
+	also initiate pool or cluster for parallelization
+2. BASIS_Master - main body that controls the flow of BASIS algorithm
+	(i) prepare initial samples
+	(ii) distribute work to ‘BASIS_Worker’ for each available cpu
+	(iii) collect and analyze results, prepare for next stage
+3. BASIS_Worker - run on each available cpu to
+	(i) calculate likelihood and prior values for samples
+	(ii) perform assigned MCMC chains
+
+(Layout)
+.
++-- _data
+|   +-- _simple_system
+|       +-- _CMA
++-- _engine
+|   +-- _postprocessing
+|       +-- plot_results_hist.m
+|       +-- plotmatrix_hist.m
+|       +-- smoothn.m
+|   +-- _functions
+|       +-- _tools
+|           +-- continue_BASIS.m
+|           +-- start_parallel.m
+|       +-- _simple_system
+|           +-- adjoint_ode_simple.m
+|           +-- make_data_simple_ode.m
+|           +-- rhs_adjoint_ext.m
+|           +-- rhs_adjoint.m
+|           +-- simple_ode_loglike_cma.m
+|           +-- simple_ode_loglike_pMALA.m
+|           +-- simple_ode_loglike_smMALA.m
+|           +-- simple_ode_loglike_SN.m
+|           +-- simple_ode_loglike.m
+|           +-- simple_ode_ode_D1.m
+|           +-- simple_ode_ode_D2.m
+|           +-- simple_ode_ode.m
+|           +—- _simple_system_ode
+|               +—- data_simple_ode.mat
+|               +—- ode_simple.mat			
+|       +-- _BASIS
+|           +-- BASIS_Master.m
+|           +-- BASIS_Worker.m
+|       +-- _CMA
+|           +-- cmaes_parfor.m
+|           +-- cmaes.m
+|   +-- _optimize
+|       +-- run_SimpleSystem_CMA.m
+|   +-- _sample
+|       +-- Input_SimpleSystem.m
+|       +-- run_SimpleSystem.m
++-- HANDBOOK.txt
++-- AUTHORS
+
+(System Definition)
+1. make_data_simple_ode - create artificial data from ‘ode_simple.mat’, store it as ‘data_simple_ode.mat’ (move this file to ./data/simple_system/)
+2. adjoint_ode_simple - system defined here, creates ‘ode_simple.mat’ 
+3. simple_ode_loglike_XXX - evaluates ode, calculates loglike, gradient and proposal cov (where XXX = smMALA, pMALA, SN, or normal TMCMC) 
+	Contains function of the ode result (here, sum of both variables f(y|theta) = Y(1) + Y(2))
+
+(Helper Functions)
+1. simple_ode_ode, simple_ode_ode_D1, simple_ode_ode_D2 - solves simple ode, D1 with sensitivities and D2 with 2nd order derivatives
+2. rhs_adjoint_ext - applied in simple_ode_ode_D2, calculates sensitivities and 2nd order derivatives
+3. rhs_adjoint - simple_ode_ode_D1, calculates sensitivities
+4. plotmatrix_hist, smoothn - plotting functions
+5. continue_BASIS - used if you continue from generation file
+6. start_parallel - used if mTMCMC runs in parallel model
+7. cmaes, cmaes_parfor - optimizer functions
+
+

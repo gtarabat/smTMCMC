@@ -1,0 +1,14 @@
+
+*.m~
+*.mat
+
+*.dat
+
+
+*.bbl
+*.blg
+*.aux
+*.gz
+*.log
+*.bak
+.DS_Store
